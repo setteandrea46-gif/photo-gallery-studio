@@ -2,6 +2,8 @@
 
 Piattaforma originale ispirata al linguaggio visivo del riferimento, senza fotografie, logo o codice del sito analizzato. Le immagini pubblicate sono esclusivamente quelle caricate dal proprietario nell'area amministrativa.
 
+**Versione online:** https://atelier-notte-gallery.andsev7.chatgpt.site/g/serata-villa/view-night
+
 ## Cosa include
 
 - Intro cinematografica, galleria responsive a capitoli, timeline e lightbox.
