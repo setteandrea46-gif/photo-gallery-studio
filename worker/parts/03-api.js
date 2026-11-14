@@ -101,11 +101,45 @@ async function handleAdminApi(request, env, path) {
     return responseJson({ ok: true });
   }
 
+  if (path === "/api/admin/settings" && request.method === "GET") {
+    const settings = await env.DB.prepare("SELECT * FROM site_settings WHERE id='default'").first();
+    return responseJson(settings || {});
+  }
+
   if (path === "/api/admin/settings" && request.method === "PUT") {
     const body = await request.json();
-    await env.DB.prepare("UPDATE site_settings SET studio_name=?,contact_email=?,instagram_url=?,copyright_text=?,updated_at=CURRENT_TIMESTAMP WHERE id='default'")
-      .bind(String(body.studioName || "NOME STUDIO"), body.contactEmail || null, body.instagramUrl || null, body.copyrightText || null).run();
+    await env.DB.prepare("UPDATE site_settings SET studio_name=?,contact_email=?,instagram_url=?,copyright_text=?,accent_color=?,background_color=?,text_color=?,updated_at=CURRENT_TIMESTAMP WHERE id='default'")
+      .bind(String(body.studioName || "NOME STUDIO"), body.contactEmail || null, body.instagramUrl || null,
+        body.copyrightText || null, safeColor(body.accentColor, "#c9a96e"), safeColor(body.backgroundColor, "#0a0805"),
+        safeColor(body.textColor, "#f5f0e8")).run();
     return responseJson({ ok: true });
+  }
+
+  if (path === "/api/admin/branding-assets" && request.method === "POST") {
+    const form = await request.formData();
+    const logo = form.get("logo");
+    const intro = form.get("intro");
+    const current = await env.DB.prepare("SELECT logo_url,intro_photo_key FROM site_settings WHERE id='default'").first();
+    let logoKey = current?.logo_url || null;
+    let introKey = current?.intro_photo_key || null;
+    if (logo instanceof File && logo.size) {
+      if (!["image/png", "image/jpeg", "image/webp", "image/svg+xml"].includes(logo.type) || logo.size > 8 * 1024 * 1024) return responseJson({ error: "Logo non valido. Usa PNG, JPG, WebP o SVG fino a 8 MB." }, 400);
+      const next = `branding/logo-${crypto.randomUUID()}-${makeSlug(logo.name) || "logo"}`;
+      await env.BUCKET.put(next, logo.stream(), { httpMetadata: { contentType: logo.type } });
+      if (logoKey) await env.BUCKET.delete(logoKey);
+      logoKey = next;
+    }
+    if (intro instanceof File && intro.size) {
+      if (!["image/png", "image/jpeg", "image/webp"].includes(intro.type) || intro.size > 15 * 1024 * 1024) return responseJson({ error: "Foto introduttiva non valida. Usa JPG, PNG o WebP fino a 15 MB." }, 400);
+      const next = `branding/intro-${crypto.randomUUID()}-${makeSlug(intro.name) || "intro"}`;
+      await env.BUCKET.put(next, intro.stream(), { httpMetadata: { contentType: intro.type } });
+      if (introKey) await env.BUCKET.delete(introKey);
+      introKey = next;
+    }
+    if ((!logo || !(logo instanceof File) || !logo.size) && (!intro || !(intro instanceof File) || !intro.size)) return responseJson({ error: "Scegli almeno un file." }, 400);
+    await env.DB.prepare("UPDATE site_settings SET logo_url=?,intro_photo_key=?,updated_at=CURRENT_TIMESTAMP WHERE id='default'")
+      .bind(logoKey, introKey).run();
+    return responseJson({ ok: true, logo_url: logoKey, intro_photo_key: introKey });
   }
 
   return responseJson({ error: "Endpoint non trovato" }, 404);
@@ -117,10 +151,19 @@ export default {
     const path = url.pathname;
     try {
       if (path.startsWith("/api/admin/")) return await handleAdminApi(request, env, path);
-      if (path === "/admin") return new Response(adminPage(requireUser(request)), {
+      if (path === "/admin") return new Response(adminPageV2(requireUser(request)), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
       if (path === "/") return Response.redirect(new URL("/g/serata-villa/view-night", request.url), 302);
+
+      const brandingMatch = path.match(/^\/branding\/(.+)$/);
+      if (brandingMatch) {
+        const key = decodeURIComponent(brandingMatch[1]);
+        if (!key.startsWith("branding/")) return new Response("Not found", { status: 404 });
+        const object = await env.BUCKET.get(key);
+        if (!object) return new Response("Not found", { status: 404 });
+        return new Response(object.body, { headers: { "content-type": object.httpMetadata?.contentType || "application/octet-stream", "cache-control": "public, max-age=3600" } });
+      }
 
       const accessMatch = path.match(/^\/g\/([a-z0-9-]+)\/access$/);
       if (accessMatch && request.method === "POST") {

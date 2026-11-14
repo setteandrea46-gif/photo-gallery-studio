@@ -25,12 +25,11 @@ npm run validate
 
 ## Prima configurazione
 
-1. Aprire `/admin`.
-2. Inserire nome studio e contatti nella sezione Branding.
-3. Creare un evento e lasciarlo nascosto durante la preparazione.
-4. Caricare le proprie fotografie JPG, PNG o WebP.
-5. Attivare pubblicazione, download e password secondo necessità.
-6. Copiare il link univoco della galleria.
+1. Aprire `/admin` e scegliere **Eventi e foto** per creare l'evento.
+2. Caricare le proprie fotografie JPG, PNG o WebP nell'evento selezionato.
+3. Aprire **Allestisci il sito** per impostare colori, logo e fotografia introduttiva.
+4. Attivare pubblicazione, download e password secondo necessità.
+5. Copiare il link univoco della galleria.
 
 ## Branding
 
