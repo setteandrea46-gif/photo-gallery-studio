@@ -49,15 +49,19 @@ async function handleAdminApi(request, env, path) {
   const galleryMatch = path.match(/^\/api\/admin\/galleries\/([^/]+)$/);
   if (galleryMatch && request.method === "PATCH") {
     const body = await request.json();
-    const passwordHash = body.password === undefined ? undefined : (body.password ? await digest(String(body.password)) : null);
     const current = await env.DB.prepare("SELECT * FROM galleries WHERE id=?").bind(galleryMatch[1]).first();
     if (!current) return responseJson({ error: "Galleria non trovata" }, 404);
-    await env.DB.prepare("UPDATE galleries SET title=?,description=?,event_date=?,published=?,download_enabled=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
-      .bind(String(body.title ?? current.title), String(body.description ?? current.description), body.eventDate ?? current.event_date,
+    const nextSlug = makeSlug(body.slug ?? current.slug);
+    if (!nextSlug) return responseJson({ error: "Slug non valido" }, 400);
+    const conflict = await env.DB.prepare("SELECT id FROM galleries WHERE slug=? AND id<>?").bind(nextSlug, galleryMatch[1]).first();
+    if (conflict) return responseJson({ error: "Questo slug è già usato da un altro evento." }, 409);
+    const passwordHash = body.removePassword ? null : (body.password ? await digest(String(body.password)) : current.password_hash);
+    await env.DB.prepare("UPDATE galleries SET slug=?,title=?,description=?,event_date=?,published=?,download_enabled=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .bind(nextSlug, String(body.title ?? current.title), String(body.description ?? current.description), body.eventDate ?? current.event_date,
         body.published === undefined ? current.published : (body.published ? 1 : 0),
         body.downloadEnabled === undefined ? current.download_enabled : (body.downloadEnabled ? 1 : 0),
-        passwordHash === undefined ? current.password_hash : passwordHash, galleryMatch[1]).run();
-    return responseJson({ ok: true });
+        passwordHash, galleryMatch[1]).run();
+    return responseJson({ ok: true, slug: nextSlug });
   }
 
   if (galleryMatch && request.method === "DELETE") {
@@ -71,6 +75,15 @@ async function handleAdminApi(request, env, path) {
   if (photosMatch && request.method === "GET") {
     const result = await env.DB.prepare("SELECT * FROM photos WHERE gallery_id=? ORDER BY sort_order").bind(photosMatch[1]).all();
     return responseJson(result.results || []);
+  }
+
+  const coverMatch = path.match(/^\/api\/admin\/galleries\/([^/]+)\/cover$/);
+  if (coverMatch && request.method === "PUT") {
+    const body = await request.json();
+    const photo = await env.DB.prepare("SELECT id FROM photos WHERE id=? AND gallery_id=?").bind(String(body.photoId || ""), coverMatch[1]).first();
+    if (!photo) return responseJson({ error: "Fotografia non trovata" }, 404);
+    await env.DB.prepare("UPDATE galleries SET cover_photo_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(photo.id, coverMatch[1]).run();
+    return responseJson({ ok: true });
   }
 
   if (path === "/api/admin/photos" && request.method === "POST") {
@@ -98,6 +111,16 @@ async function handleAdminApi(request, env, path) {
     if (!Array.isArray(body.photoIds) || body.photoIds.length > 2000) return responseJson({ error: "Ordine non valido" }, 400);
     await env.DB.batch(body.photoIds.map((id, index) => env.DB.prepare("UPDATE photos SET sort_order=? WHERE id=? AND gallery_id=?")
       .bind(index, id, String(body.galleryId || ""))));
+    return responseJson({ ok: true });
+  }
+
+  const photoMatch = path.match(/^\/api\/admin\/photos\/([^/]+)$/);
+  if (photoMatch && request.method === "DELETE") {
+    const photo = await env.DB.prepare("SELECT id,gallery_id,storage_key FROM photos WHERE id=?").bind(photoMatch[1]).first();
+    if (!photo) return responseJson({ error: "Fotografia non trovata" }, 404);
+    await env.BUCKET.delete(photo.storage_key);
+    await env.DB.prepare("DELETE FROM photos WHERE id=?").bind(photo.id).run();
+    await env.DB.prepare("UPDATE galleries SET cover_photo_id=NULL WHERE id=? AND cover_photo_id=?").bind(photo.gallery_id, photo.id).run();
     return responseJson({ ok: true });
   }
 
@@ -151,10 +174,20 @@ export default {
     const path = url.pathname;
     try {
       if (path.startsWith("/api/admin/")) return await handleAdminApi(request, env, path);
-      if (path === "/admin") return new Response(adminPageV2(requireUser(request)), {
+      if (path === "/admin") return new Response(adminPageV3(requireUser(request)), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
       if (path === "/") return Response.redirect(new URL("/g/serata-villa/view-night", request.url), 302);
+
+      const adminMediaMatch = path.match(/^\/admin-media\/(.+)$/);
+      if (adminMediaMatch) {
+        requireUser(request);
+        const key = decodeURIComponent(adminMediaMatch[1]);
+        if (!key.startsWith("galleries/")) return new Response("Not found", { status: 404 });
+        const object = await env.BUCKET.get(key);
+        if (!object) return new Response("Not found", { status: 404 });
+        return new Response(object.body, { headers: { "content-type": object.httpMetadata?.contentType || "application/octet-stream", "cache-control": "private, max-age=300" } });
+      }
 
       const brandingMatch = path.match(/^\/branding\/(.+)$/);
       if (brandingMatch) {
