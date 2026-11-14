@@ -1,0 +1,6 @@
+CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE galleries (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', event_date TEXT, cover_photo_id TEXT, published INTEGER NOT NULL DEFAULT 0, download_enabled INTEGER NOT NULL DEFAULT 0, password_hash TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE photos (id TEXT PRIMARY KEY, gallery_id TEXT NOT NULL REFERENCES galleries(id) ON DELETE CASCADE, storage_key TEXT NOT NULL UNIQUE, thumbnail_key TEXT, filename TEXT NOT NULL, mime_type TEXT NOT NULL, width INTEGER, height INTEGER, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX photos_gallery_order_idx ON photos(gallery_id, sort_order);
+CREATE TABLE site_settings (id TEXT PRIMARY KEY DEFAULT 'default', studio_name TEXT NOT NULL DEFAULT 'NOME STUDIO', logo_url TEXT, accent_color TEXT NOT NULL DEFAULT '#c9a96e', contact_email TEXT, instagram_url TEXT, copyright_text TEXT, watermark_text TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+INSERT INTO site_settings (id) VALUES ('default');

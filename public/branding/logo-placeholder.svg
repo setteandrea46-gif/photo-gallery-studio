@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 120" role="img" aria-labelledby="title description">
+  <title id="title">Logo segnaposto</title>
+  <description id="description">Sostituire questo file con il logo dello studio.</description>
+  <rect width="320" height="120" fill="none" stroke="#c9a96e" stroke-width="2"/>
+  <text x="160" y="58" text-anchor="middle" fill="#c9a96e" font-family="serif" font-size="24">NOME STUDIO</text>
+  <text x="160" y="83" text-anchor="middle" fill="#f5f0e8" font-family="sans-serif" font-size="10" letter-spacing="4">FOTOGRAFIA</text>
+</svg>
