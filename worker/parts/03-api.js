@@ -31,8 +31,15 @@ async function handleAdminApi(request, env, path) {
     const title = String(body.title || "").trim();
     const gallerySlug = makeSlug(body.slug || title);
     if (!title || !gallerySlug) return responseJson({ error: "Titolo non valido" }, 400);
-    const id = crypto.randomUUID();
     const passwordHash = body.password ? await digest(String(body.password)) : null;
+    const existing = await env.DB.prepare("SELECT id FROM galleries WHERE slug=?").bind(gallerySlug).first();
+    if (existing) {
+      await env.DB.prepare("UPDATE galleries SET title=?,description=?,event_date=?,published=?,download_enabled=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+        .bind(title, String(body.description || ""), body.eventDate || null, body.published ? 1 : 0,
+          body.downloadEnabled ? 1 : 0, passwordHash, existing.id).run();
+      return responseJson({ id: existing.id, slug: gallerySlug, reused: true });
+    }
+    const id = crypto.randomUUID();
     await env.DB.prepare("INSERT INTO galleries (id,slug,title,description,event_date,published,download_enabled,password_hash,created_by) VALUES (?,?,?,?,?,?,?,?,?)")
       .bind(id, gallerySlug, title, String(body.description || ""), body.eventDate || null,
         body.published ? 1 : 0, body.downloadEnabled ? 1 : 0, passwordHash, user.id).run();
