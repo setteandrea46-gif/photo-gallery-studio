@@ -44,6 +44,51 @@ async function handleAdminApi(request, env, path) {
     return responseJson({ ok: true });
   }
 
+  const polaroidsMatch = path.match(/^\/api\/admin\/galleries\/([^/]+)\/polaroids$/);
+  if (polaroidsMatch && request.method === "GET") {
+    const result = await env.DB.prepare("SELECT * FROM polaroid_photos WHERE gallery_id=? ORDER BY sort_order,created_at")
+      .bind(polaroidsMatch[1]).all();
+    return responseJson(result.results || []);
+  }
+
+  if (path === "/api/admin/polaroids" && request.method === "POST") {
+    const form = await request.formData();
+    const galleryId = String(form.get("galleryId") || "");
+    const files = form.getAll("files");
+    const gallery = await env.DB.prepare("SELECT id FROM galleries WHERE id=?").bind(galleryId).first();
+    if (!gallery || files.length < 1 || files.length > 25) return responseJson({ error: "Caricamento non valido (1–25 file)." }, 400);
+    const maximum = await env.DB.prepare("SELECT COALESCE(MAX(sort_order),-1) maximum FROM polaroid_photos WHERE gallery_id=?").bind(galleryId).first();
+    let order = Number(maximum?.maximum ?? -1) + 1;
+    for (const file of files) {
+      if (!(file instanceof File) || !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 15 * 1024 * 1024) {
+        return responseJson({ error: "Sono accettate immagini JPG, PNG o WebP fino a 15 MB." }, 400);
+      }
+      const id = crypto.randomUUID();
+      const key = `polaroids/${galleryId}/${id}-${makeSlug(file.name) || "polaroid"}`;
+      await env.BUCKET.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
+      await env.DB.prepare("INSERT INTO polaroid_photos (id,gallery_id,storage_key,filename,mime_type,sort_order) VALUES (?,?,?,?,?,?)")
+        .bind(id, galleryId, key, file.name, file.type, order++).run();
+    }
+    return responseJson({ ok: true, count: files.length }, 201);
+  }
+
+  if (path === "/api/admin/polaroids/reorder" && request.method === "PUT") {
+    const body = await request.json();
+    if (!Array.isArray(body.photoIds) || body.photoIds.length > 2000) return responseJson({ error: "Ordine non valido" }, 400);
+    await env.DB.batch(body.photoIds.map((id, index) => env.DB.prepare("UPDATE polaroid_photos SET sort_order=? WHERE id=? AND gallery_id=?")
+      .bind(index, id, String(body.galleryId || ""))));
+    return responseJson({ ok: true });
+  }
+
+  const polaroidPhotoMatch = path.match(/^\/api\/admin\/polaroids\/([^/]+)$/);
+  if (polaroidPhotoMatch && request.method === "DELETE") {
+    const photo = await env.DB.prepare("SELECT storage_key FROM polaroid_photos WHERE id=?").bind(polaroidPhotoMatch[1]).first();
+    if (!photo) return responseJson({ error: "Polaroid non trovata" }, 404);
+    await env.BUCKET.delete(photo.storage_key);
+    await env.DB.prepare("DELETE FROM polaroid_photos WHERE id=?").bind(polaroidPhotoMatch[1]).run();
+    return responseJson({ ok: true });
+  }
+
   if (path === "/api/admin/galleries" && request.method === "GET") {
     const result = await env.DB.prepare("SELECT * FROM galleries ORDER BY created_at DESC").all();
     return responseJson(result.results || []);
@@ -79,17 +124,19 @@ async function handleAdminApi(request, env, path) {
     const conflict = await env.DB.prepare("SELECT id FROM galleries WHERE slug=? AND id<>?").bind(nextSlug, galleryMatch[1]).first();
     if (conflict) return responseJson({ error: "Questo slug è già usato da un altro evento." }, 409);
     const passwordHash = body.removePassword ? null : (body.password ? await digest(String(body.password)) : current.password_hash);
-    await env.DB.prepare("UPDATE galleries SET slug=?,title=?,description=?,event_date=?,published=?,download_enabled=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+    await env.DB.prepare("UPDATE galleries SET slug=?,title=?,description=?,event_date=?,published=?,download_enabled=?,password_hash=?,polaroid_expires_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
       .bind(nextSlug, String(body.title ?? current.title), String(body.description ?? current.description), body.eventDate ?? current.event_date,
         body.published === undefined ? current.published : (body.published ? 1 : 0),
         body.downloadEnabled === undefined ? current.download_enabled : (body.downloadEnabled ? 1 : 0),
-        passwordHash, galleryMatch[1]).run();
+        passwordHash, body.polaroidExpiresAt === undefined ? current.polaroid_expires_at : (body.polaroidExpiresAt || null), galleryMatch[1]).run();
     return responseJson({ ok: true, slug: nextSlug });
   }
 
   if (galleryMatch && request.method === "DELETE") {
     const photos = await env.DB.prepare("SELECT storage_key FROM photos WHERE gallery_id=?").bind(galleryMatch[1]).all();
     for (const photo of photos.results || []) await env.BUCKET.delete(photo.storage_key);
+    const polaroids = await env.DB.prepare("SELECT storage_key FROM polaroid_photos WHERE gallery_id=?").bind(galleryMatch[1]).all();
+    for (const photo of polaroids.results || []) await env.BUCKET.delete(photo.storage_key);
     await env.DB.prepare("DELETE FROM galleries WHERE id=?").bind(galleryMatch[1]).run();
     return responseJson({ ok: true });
   }
@@ -214,7 +261,7 @@ export default {
       if (adminMediaMatch) {
         await requireAdmin(request, env);
         const key = decodeURIComponent(adminMediaMatch[1]);
-        if (!key.startsWith("galleries/")) return new Response("Not found", { status: 404 });
+        if (!key.startsWith("galleries/") && !key.startsWith("polaroids/")) return new Response("Not found", { status: 404 });
         const object = await env.BUCKET.get(key);
         if (!object) return new Response("Not found", { status: 404 });
         return new Response(object.body, { headers: { "content-type": object.httpMetadata?.contentType || "application/octet-stream", "cache-control": "private, max-age=300" } });
@@ -250,6 +297,39 @@ export default {
         const object = await env.BUCKET.get(key);
         if (!object) return new Response("Not found", { status: 404 });
         return new Response(object.body, { headers: { "content-type": object.httpMetadata?.contentType || "application/octet-stream", "cache-control": "private, max-age=3600" } });
+      }
+
+      const polaroidMediaMatch = path.match(/^\/polaroid-media\/([^/]+)$/);
+      if (polaroidMediaMatch) {
+        const photo = await env.DB.prepare("SELECT p.*,g.published,g.polaroid_expires_at FROM polaroid_photos p JOIN galleries g ON g.id=p.gallery_id WHERE p.id=?")
+          .bind(polaroidMediaMatch[1]).first();
+        if (!photo || !photo.published || (photo.polaroid_expires_at && photo.polaroid_expires_at < new Date().toISOString().slice(0, 10))) {
+          return new Response("Not found", { status: 404 });
+        }
+        const object = await env.BUCKET.get(photo.storage_key);
+        if (!object) return new Response("Not found", { status: 404 });
+        const headers = { "content-type": object.httpMetadata?.contentType || photo.mime_type || "application/octet-stream", "cache-control": "public, max-age=3600" };
+        if (url.searchParams.get("download") === "1") headers["content-disposition"] = `attachment; filename="${String(photo.filename).replace(/"/g, "")}"`;
+        return new Response(object.body, { headers });
+      }
+
+      const polaroidZipMatch = path.match(/^\/g\/([a-z0-9-]+)\/polaroids\.zip$/);
+      if (polaroidZipMatch) {
+        const item = await readGallery(env, polaroidZipMatch[1], false);
+        if (!item || !item.polaroids.length || (item.polaroid_expires_at && item.polaroid_expires_at < new Date().toISOString().slice(0, 10))) {
+          return new Response("Angolo Polaroid non disponibile", { status: 404 });
+        }
+        return polaroidZipResponse(env, item.polaroids, `${item.slug}-polaroid`);
+      }
+
+      const polaroidPageMatch = path.match(/^\/g\/([a-z0-9-]+)\/polaroids$/);
+      if (polaroidPageMatch) {
+        const item = await readGallery(env, polaroidPageMatch[1], false);
+        const settings = await env.DB.prepare("SELECT * FROM site_settings WHERE id='default'").first();
+        if (!item || !item.polaroids.length || (item.polaroid_expires_at && item.polaroid_expires_at < new Date().toISOString().slice(0, 10))) {
+          return new Response("Angolo Polaroid non disponibile", { status: 404 });
+        }
+        return new Response(polaroidPage(item, settings), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } });
       }
 
       const galleryMatch = path.match(/^\/g\/([a-z0-9-]+)(?:\/view-night)?$/);

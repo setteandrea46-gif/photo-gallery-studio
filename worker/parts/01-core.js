@@ -51,7 +51,9 @@ const demoGallery = {
   published: 1,
   download_enabled: 0,
   password_hash: null,
+  polaroid_expires_at: null,
   photos: Array.from({ length: 36 }, (_, index) => ({ id: `demo-${index + 1}`, sort_order: index })),
+  polaroids: [],
 };
 
 async function readGallery(env, slug, includeHidden = false) {
@@ -59,7 +61,107 @@ async function readGallery(env, slug, includeHidden = false) {
   if (!item || (!includeHidden && !item.published)) return null;
   const photos = await env.DB.prepare("SELECT * FROM photos WHERE gallery_id = ? ORDER BY sort_order, created_at")
     .bind(item.id).all();
-  return { ...item, photos: photos.results || [] };
+  const polaroids = await env.DB.prepare("SELECT * FROM polaroid_photos WHERE gallery_id = ? ORDER BY sort_order, created_at")
+    .bind(item.id).all();
+  return { ...item, photos: photos.results || [], polaroids: polaroids.results || [] };
+}
+
+const crcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let value = n;
+    for (let bit = 0; bit < 8; bit++) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+    table[n] = value >>> 0;
+  }
+  return table;
+})();
+
+function zipBytes(length, writer) {
+  const bytes = new Uint8Array(length);
+  writer(new DataView(bytes.buffer));
+  return bytes;
+}
+
+function zipDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+function crcUpdate(crc, chunk) {
+  let value = crc;
+  for (const byte of chunk) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return value >>> 0;
+}
+
+function safeDownloadName(value, index) {
+  const clean = String(value || "polaroid.jpg").replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").slice(-120);
+  return `${String(index + 1).padStart(3, "0")}-${clean || "polaroid.jpg"}`;
+}
+
+function polaroidZipResponse(env, photos, slug) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const central = [];
+        let offset = 0;
+        for (let index = 0; index < photos.length; index++) {
+          const photo = photos[index];
+          const object = await env.BUCKET.get(photo.storage_key);
+          if (!object) continue;
+          const name = encoder.encode(safeDownloadName(photo.filename, index));
+          const stamp = zipDateTime(new Date(photo.created_at || Date.now()));
+          const localOffset = offset;
+          const local = zipBytes(30, (view) => {
+            view.setUint32(0, 0x04034b50, true); view.setUint16(4, 20, true); view.setUint16(6, 0x0808, true);
+            view.setUint16(8, 0, true); view.setUint16(10, stamp.time, true); view.setUint16(12, stamp.date, true);
+            view.setUint16(26, name.length, true); view.setUint16(28, 0, true);
+          });
+          controller.enqueue(local); controller.enqueue(name); offset += local.length + name.length;
+          let crc = 0xffffffff;
+          let size = 0;
+          const reader = object.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            crc = crcUpdate(crc, value); size += value.length; offset += value.length; controller.enqueue(value);
+          }
+          crc = (crc ^ 0xffffffff) >>> 0;
+          const descriptor = zipBytes(16, (view) => {
+            view.setUint32(0, 0x08074b50, true); view.setUint32(4, crc, true);
+            view.setUint32(8, size, true); view.setUint32(12, size, true);
+          });
+          controller.enqueue(descriptor); offset += descriptor.length;
+          const header = zipBytes(46, (view) => {
+            view.setUint32(0, 0x02014b50, true); view.setUint16(4, 20, true); view.setUint16(6, 20, true);
+            view.setUint16(8, 0x0808, true); view.setUint16(10, 0, true); view.setUint16(12, stamp.time, true);
+            view.setUint16(14, stamp.date, true); view.setUint32(16, crc, true); view.setUint32(20, size, true);
+            view.setUint32(24, size, true); view.setUint16(28, name.length, true); view.setUint32(42, localOffset, true);
+          });
+          central.push(header, name);
+        }
+        const centralOffset = offset;
+        let centralSize = 0;
+        for (const part of central) { controller.enqueue(part); centralSize += part.length; }
+        const entries = central.length / 2;
+        const end = zipBytes(22, (view) => {
+          view.setUint32(0, 0x06054b50, true); view.setUint16(8, entries, true); view.setUint16(10, entries, true);
+          view.setUint32(12, centralSize, true); view.setUint32(16, centralOffset, true);
+        });
+        controller.enqueue(end); controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
+  return new Response(stream, { headers: {
+    "content-type": "application/zip",
+    "content-disposition": `attachment; filename="${makeSlug(slug) || "polaroid"}.zip"`,
+    "cache-control": "private, no-store",
+  } });
 }
 
 function globalStyles() {
@@ -75,6 +177,7 @@ function globalStyles() {
 .picture{background-image:var(--photo,linear-gradient(145deg,#d9d1c7,#8d8276 52%,#28231f));background-size:var(--photo-size,cover)}
 .card:nth-child(3n+2) .picture{background-image:var(--photo,linear-gradient(35deg,#171410,#9b8b78 55%,#e8e0d7))}.card:nth-child(3n) .picture{background-image:var(--photo,radial-gradient(circle at 65% 35%,#d1b47b,#51463b 30%,#111 70%))}.intro-bg{background-image:linear-gradient(#0006,#0009),var(--intro-photo,radial-gradient(circle at 65% 30%,#7f6c53,#221b15 36%,#070605 75%));background-size:cover;background-position:center}.lightbox-picture{background-image:linear-gradient(145deg,#d9d1c7,#8d8276 52%,#28231f)}
 .brand-logo{display:block;max-width:135px;max-height:42px;object-fit:contain}.admin-nav{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:26px 0}.admin-nav button{padding:15px}.admin-nav button.active{background:var(--gold);border-color:var(--gold);color:var(--ink)}.dashboard-view[hidden]{display:none}.setup-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}.asset-preview{min-height:150px;border:1px dashed #665e55;display:grid;place-items:center;margin:12px 0;background:#0a0805 center/cover no-repeat}.asset-preview img{max-width:80%;max-height:120px}.color-row{display:grid;grid-template-columns:1fr 60px;gap:10px}.color-row input[type=color]{height:44px;padding:3px}.section-kicker{font-size:9px;letter-spacing:.2em;color:var(--gold);margin-bottom:5px}@media(max-width:700px){.setup-grid{grid-template-columns:1fr}.admin-nav{position:sticky;top:0;z-index:5;background:var(--ink);padding:8px 0}}
+.polaroid-entry{position:absolute;z-index:2;right:175px;bottom:22px;text-decoration:none}.polaroid-hero{text-align:center;padding:70px 15px 45px}.polaroid-hero h1{font:italic 300 clamp(58px,10vw,130px)/.85 'Cormorant Garamond',serif;margin:10px 0}.qr-box{background:#fff;padding:14px;display:inline-grid;place-items:center;margin:10px 0}.qr-box canvas{max-width:220px;height:auto!important}@media(max-width:620px){.polaroid-entry{right:22px;bottom:76px}.polaroid-hero{padding-top:45px}}
 .event-actions{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end}.event-actions a{text-decoration:none}.manager{border:1px solid var(--gold);padding:20px;margin:25px 0;background:#0f0c09}.manager[hidden]{display:none}.manager-head{display:flex;justify-content:space-between;align-items:center;gap:15px}.manager-head h2{margin:0;font:300 34px 'Cormorant Garamond'}.photo-manager{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:15px}.photo-row{display:grid;grid-template-columns:60px 1fr;gap:10px;border:1px solid #3a332d;padding:7px}.photo-thumb{width:60px;height:60px;object-fit:cover;background:#231e19}.photo-meta{min-width:0}.photo-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}.photo-controls{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.photo-controls button{padding:5px 8px;font-size:8px}.cover-tag{color:var(--gold);font-size:8px;letter-spacing:.15em}@media(max-width:700px){.photo-manager{grid-template-columns:1fr}.manager-head{align-items:flex-start}.event-actions{justify-content:flex-start}.gallery-row{grid-template-columns:1fr}}
 </style>`;
 }
