@@ -20,6 +20,17 @@ function requireUser(request) {
   return user;
 }
 
+async function requireAdmin(request, env) {
+  const user = requireUser(request);
+  const admin = await env.DB.prepare("SELECT email FROM site_admins WHERE email = ? COLLATE NOCASE")
+    .bind(user.email).first();
+  if (!admin) throw new Response(JSON.stringify({ error: "Questo account non è autorizzato." }), {
+    status: 403,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+  return user;
+}
+
 const makeSlug = (value) => String(value).normalize("NFD")
   .replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-")
   .replace(/^-|-$/g, "").slice(0, 64);

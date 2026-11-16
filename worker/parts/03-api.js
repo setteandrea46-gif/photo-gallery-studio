@@ -17,9 +17,32 @@ function accessPage(gallery, error = "") {
 }
 
 async function handleAdminApi(request, env, path) {
-  const user = requireUser(request);
-  await env.DB.prepare("INSERT OR IGNORE INTO users (id,email,role) VALUES (?,?,?)")
-    .bind(user.id, user.email, "admin").run();
+  const user = await requireAdmin(request, env);
+  await env.DB.prepare("INSERT OR REPLACE INTO users (id,email,role,created_at) VALUES (?,?,?,COALESCE((SELECT created_at FROM users WHERE id=?),CURRENT_TIMESTAMP))")
+    .bind(user.id, user.email, "admin", user.id).run();
+
+  if (path === "/api/admin/collaborators" && request.method === "GET") {
+    const result = await env.DB.prepare("SELECT email,created_at FROM site_admins ORDER BY created_at,email").all();
+    return responseJson({ currentEmail: user.email, collaborators: result.results || [] });
+  }
+
+  if (path === "/api/admin/collaborators" && request.method === "POST") {
+    const body = await request.json();
+    const email = String(body.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return responseJson({ error: "Inserisci un indirizzo e-mail valido." }, 400);
+    await env.DB.prepare("INSERT OR IGNORE INTO site_admins (email,added_by) VALUES (?,?)").bind(email, user.id).run();
+    return responseJson({ ok: true, email }, 201);
+  }
+
+  const collaboratorMatch = path.match(/^\/api\/admin\/collaborators\/(.+)$/);
+  if (collaboratorMatch && request.method === "DELETE") {
+    const email = decodeURIComponent(collaboratorMatch[1]).trim().toLowerCase();
+    if (email === user.email.toLowerCase()) return responseJson({ error: "Non puoi rimuovere l'account con cui sei collegato." }, 400);
+    const count = await env.DB.prepare("SELECT COUNT(*) total FROM site_admins").first();
+    if (Number(count?.total || 0) <= 1) return responseJson({ error: "Deve restare almeno un amministratore." }, 400);
+    await env.DB.prepare("DELETE FROM site_admins WHERE email = ? COLLATE NOCASE").bind(email).run();
+    return responseJson({ ok: true });
+  }
 
   if (path === "/api/admin/galleries" && request.method === "GET") {
     const result = await env.DB.prepare("SELECT * FROM galleries ORDER BY created_at DESC").all();
@@ -176,7 +199,12 @@ export default {
       if (path.startsWith("/api/admin/")) return await handleAdminApi(request, env, path);
       if (path === "/admin") {
         const user = currentUser(request);
-        return new Response(user.id ? adminPageV3(user) : adminLoginPage(), {
+        let page = adminLoginPage();
+        if (user.id) {
+          const admin = await env.DB.prepare("SELECT email FROM site_admins WHERE email = ? COLLATE NOCASE").bind(user.email).first();
+          page = admin ? adminPageV3(user) : adminDeniedPage(user);
+        }
+        return new Response(page, {
           headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
         });
       }
@@ -184,7 +212,7 @@ export default {
 
       const adminMediaMatch = path.match(/^\/admin-media\/(.+)$/);
       if (adminMediaMatch) {
-        requireUser(request);
+        await requireAdmin(request, env);
         const key = decodeURIComponent(adminMediaMatch[1]);
         if (!key.startsWith("galleries/")) return new Response("Not found", { status: 404 });
         const object = await env.BUCKET.get(key);
