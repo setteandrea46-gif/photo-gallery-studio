@@ -113,7 +113,7 @@ function adminPageV3(user) {
 }
 
 function adminLoginPage() {
-  return `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accesso amministratore</title>${globalStyles()}</head><body><main class="admin" style="max-width:620px;padding-top:12vh"><section class="panel" style="text-align:center;padding:42px 24px"><span class="section-kicker">AREA RISERVATA</span><h1 style="margin:10px 0 14px">Amministrazione</h1><p>Le gallerie sono pubbliche, ma questa sezione è accessibile soltanto al proprietario del sito.</p><a class="gold" style="display:inline-block;text-decoration:none;margin-top:18px" target="_top" href="/signin-with-chatgpt?return_to=%2Fadmin">ACCEDI ALL'AREA AMMINISTRATIVA</a><p style="margin-top:28px"><a class="outline" href="/">TORNA AL SITO</a></p></section></main></body></html>`;
+  return `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accesso amministratore</title>${globalStyles()}</head><body><main class="admin" style="max-width:620px;padding-top:12vh"><section class="panel" style="text-align:center;padding:42px 24px"><span class="section-kicker">AREA RISERVATA</span><h1 style="margin:10px 0 14px">Amministrazione</h1><p>Le gallerie sono pubbliche, mentre questa sezione è riservata al proprietario e ai collaboratori autorizzati.</p><a class="gold" style="display:inline-block;text-decoration:none;margin-top:18px" target="_top" href="/signin-with-chatgpt?return_to=%2Fadmin">ACCEDI ALL'AREA AMMINISTRATIVA</a><p style="margin-top:28px"><a class="outline" href="/">TORNA AL SITO</a></p></section></main></body></html>`;
 }
 
 function adminDeniedPage(user) {
