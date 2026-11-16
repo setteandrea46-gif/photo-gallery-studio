@@ -174,9 +174,12 @@ export default {
     const path = url.pathname;
     try {
       if (path.startsWith("/api/admin/")) return await handleAdminApi(request, env, path);
-      if (path === "/admin") return new Response(adminPageV3(requireUser(request)), {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      });
+      if (path === "/admin") {
+        const user = currentUser(request);
+        return new Response(user.id ? adminPageV3(user) : adminLoginPage(), {
+          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
       if (path === "/") return Response.redirect(new URL("/g/serata-villa/view-night", request.url), 302);
 
       const adminMediaMatch = path.match(/^\/admin-media\/(.+)$/);
